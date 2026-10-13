@@ -1,0 +1,1230 @@
+"use client";
+
+import { useState, useEffect, useCallback, useRef } from "react";
+import Image from "next/image";
+import Link from "next/link";
+import { useRouter, useParams } from "next/navigation";
+import {
+  ShieldCheck, Loader2, Copy, Check, ChevronDown, ChevronUp,
+  ShoppingBag, Truck, CreditCard, Smartphone, User,
+  Minus, Plus, ArrowLeft, Paperclip,
+} from "lucide-react";
+import { useCart } from "@/lib/cart-context";
+import { formatPrice, copyToClipboard } from "@/lib/utils";
+import { toast } from "@/hooks/use-toast";
+import { CartReviews } from "@/components/store/CartReviews";
+
+function PixIcon({ size = 20 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 100 100" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+      <path d="M50,50 L32,23 Q50,4 68,23 Z"/>
+      <path d="M50,50 L77,32 Q96,50 77,68 Z"/>
+      <path d="M50,50 L68,77 Q50,96 32,77 Z"/>
+      <path d="M50,50 L23,68 Q4,50 23,32 Z"/>
+    </svg>
+  );
+}
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type Stage = "dados" | "endereco" | "pagamento" | "pix";
+type PayMethod = "pix" | "card";
+
+// Cada etapa vira uma URL real (/checkout, /checkout/entrega, /checkout/pagamento,
+// /checkout/pix) pra o botão físico de voltar do celular navegar etapa por etapa
+// em vez de pular tudo pra fora do checkout.
+const STAGE_PATH: Record<Stage, string> = {
+  dados: "/checkout", endereco: "/checkout/entrega", pagamento: "/checkout/pagamento", pix: "/checkout/pix",
+};
+function stageFromSegment(seg: string | undefined): Stage {
+  if (seg === "entrega") return "endereco";
+  if (seg === "pagamento") return "pagamento";
+  if (seg === "pix") return "pix";
+  return "dados";
+}
+
+interface ShippingMethod {
+  id: string; name: string; description: string | null;
+  price: number; minDays: number | null; maxDays: number | null; freeAbove: number | null;
+}
+interface PixResult    { orderId: string; orderNumber: string; qrCode: string; qrCodeBase64: string; total: number; merchantName?: string }
+
+const STEP_COLOR = "var(--vep-checkout-step-active-bg, #16c789)";
+const STEP_TEXT  = "var(--vep-checkout-step-active-text, #fff)";
+const DONE_COLOR = "var(--vep-checkout-step-done-bg, #16c789)";
+const DONE_TEXT  = "var(--vep-checkout-step-done-text, #fff)";
+const SECTION_NUM_BG   = "var(--vep-checkout-section-num-bg, #FFCD11)";
+const SECTION_NUM_TEXT = "var(--vep-checkout-section-num-text, #000000)";
+const CHECKMARK_BG   = "var(--vep-checkout-checkmark-bg, #16c789)";
+const CHECKMARK_TEXT = "var(--vep-checkout-checkmark-text, #fff)";
+
+// ─── Countdown Timer ──────────────────────────────────────────────────────────
+
+function CountdownTimer({ seconds }: { seconds: number }) {
+  const [left, setLeft] = useState(seconds);
+  useEffect(() => {
+    if (left <= 0) return;
+    const t = setInterval(() => setLeft((n) => n - 1), 1000);
+    return () => clearInterval(t);
+  }, [left]);
+  const m = Math.floor(left / 60);
+  const s = left % 60;
+  return (
+    <span className="font-mono font-black text-sm" style={{ color: STEP_COLOR }}>
+      {String(m).padStart(2, "0")}:{String(s).padStart(2, "0")}
+    </span>
+  );
+}
+
+// ─── Step Indicator ───────────────────────────────────────────────────────────
+
+function StepBar({ step }: { step: 0 | 1 | 2 }) {
+  const steps = [
+    { label: "Informações pessoais", icon: User },
+    { label: "Entrega",              icon: Truck },
+    { label: "Pagamento",            icon: CreditCard },
+  ];
+  return (
+    <div className="flex items-start justify-between w-full mb-6">
+      {steps.map(({ label, icon: Icon }, i) => {
+        const done   = i < step;
+        const active = i === step;
+        return (
+          <div key={i} className="flex flex-col items-center flex-1 relative">
+            {/* connector line left */}
+            {i > 0 && (
+              <div
+                className="absolute left-0 top-5 h-0.5 w-1/2 -translate-y-1/2"
+                style={{ backgroundColor: i <= step ? DONE_COLOR : "#E5E7EB" }}
+              />
+            )}
+            {/* connector line right */}
+            {i < 2 && (
+              <div
+                className="absolute right-0 top-5 h-0.5 w-1/2 -translate-y-1/2"
+                style={{ backgroundColor: i < step ? DONE_COLOR : "#E5E7EB" }}
+              />
+            )}
+            <div
+              className="w-10 h-10 rounded-lg flex items-center justify-center z-10 border-2 transition-all"
+              style={
+                active
+                  ? { backgroundColor: STEP_COLOR, borderColor: STEP_COLOR, color: STEP_TEXT }
+                  : done
+                  ? { backgroundColor: DONE_COLOR, borderColor: DONE_COLOR, color: DONE_TEXT }
+                  : { backgroundColor: "#fff", borderColor: "#D1D5DB", color: "#9CA3AF" }
+              }
+            >
+              {done ? <Check className="w-5 h-5" /> : <Icon className="w-5 h-5" />}
+            </div>
+            <span
+              className="text-[10px] font-semibold mt-1 text-center leading-tight"
+              style={{ color: active || done ? DONE_COLOR : "#9CA3AF" }}
+            >
+              {label}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Form helpers ─────────────────────────────────────────────────────────────
+
+const inp = "w-full h-12 px-4 pr-10 border rounded-lg text-[16px] focus:outline-none transition-colors bg-white";
+
+// ─── Phone: country code + local number ────────────────────────────────────────
+// Kept separate so people don't type the country code into the DDD slot by
+// habit (e.g. "55 92 99917-368") — that silently ate a digit and corrupted
+// the DDD, because the old single field just grabbed the first 2 digits.
+
+const COUNTRY_CODES = [
+  { code: "55",  name: "Brasil",        flag: "🇧🇷" },
+  { code: "1",   name: "EUA/Canadá",    flag: "🇺🇸" },
+  { code: "351", name: "Portugal",      flag: "🇵🇹" },
+  { code: "54",  name: "Argentina",     flag: "🇦🇷" },
+  { code: "598", name: "Uruguai",       flag: "🇺🇾" },
+  { code: "595", name: "Paraguai",      flag: "🇵🇾" },
+  { code: "56",  name: "Chile",         flag: "🇨🇱" },
+  { code: "57",  name: "Colômbia",      flag: "🇨🇴" },
+  { code: "51",  name: "Peru",          flag: "🇵🇪" },
+  { code: "58",  name: "Venezuela",     flag: "🇻🇪" },
+  { code: "52",  name: "México",        flag: "🇲🇽" },
+  { code: "34",  name: "Espanha",       flag: "🇪🇸" },
+  { code: "39",  name: "Itália",        flag: "🇮🇹" },
+  { code: "44",  name: "Reino Unido",   flag: "🇬🇧" },
+  { code: "49",  name: "Alemanha",      flag: "🇩🇪" },
+  { code: "33",  name: "França",        flag: "🇫🇷" },
+  { code: "81",  name: "Japão",         flag: "🇯🇵" },
+  { code: "86",  name: "China",         flag: "🇨🇳" },
+  { code: "91",  name: "Índia",         flag: "🇮🇳" },
+  { code: "61",  name: "Austrália",     flag: "🇦🇺" },
+] as const;
+
+function maskLocalPhone(v: string) {
+  const d = v.replace(/\D/g, "").slice(0, 11);
+  if (d.length <= 2) return d;
+  if (d.length <= 7) return `(${d.slice(0,2)}) ${d.slice(2)}`;
+  return `(${d.slice(0,2)}) ${d.slice(2,7)}-${d.slice(7)}`;
+}
+
+function CountryCodeSelect({ value, onChange }: { value: string; onChange: (code: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const current = COUNTRY_CODES.find((c) => c.code === value) || COUNTRY_CODES[0];
+
+  useEffect(() => {
+    function onClickOutside(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, []);
+
+  return (
+    <div className="relative flex-shrink-0" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="h-12 px-2.5 border-2 border-gray-200 rounded-lg bg-white flex items-center gap-1 text-[15px] font-medium hover:border-gray-300 transition-colors"
+      >
+        <span>{current.flag}</span>
+        <span>+{current.code}</span>
+        <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
+      </button>
+      {open && (
+        <div className="absolute z-20 top-[calc(100%+4px)] left-0 w-56 max-h-64 overflow-y-auto bg-white border rounded-lg shadow-lg py-1">
+          {COUNTRY_CODES.map((c) => (
+            <button
+              key={c.code}
+              type="button"
+              onClick={() => { onChange(c.code); setOpen(false); }}
+              className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-gray-50 ${c.code === value ? "bg-gray-50 font-semibold" : ""}`}
+            >
+              <span>{c.flag}</span>
+              <span className="flex-1">{c.name}</span>
+              <span className="text-gray-400">+{c.code}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ValidatedInput({
+  label, required = false, valid = false, type = "text", value, onChange, placeholder, inputMode, maxLength, autoComplete,
+}: {
+  label: string; required?: boolean; valid?: boolean; type?: string;
+  value: string; onChange: (v: string) => void; placeholder?: string;
+  inputMode?: React.InputHTMLAttributes<HTMLInputElement>["inputMode"];
+  maxLength?: number; autoComplete?: string;
+}) {
+  return (
+    <div>
+      <label className="block text-sm font-semibold text-gray-700 mb-1">
+        {label}{required && <span className="text-red-500 ml-0.5">*</span>}
+      </label>
+      <div className="relative">
+        <input
+          type={type} value={value} onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder} inputMode={inputMode} maxLength={maxLength}
+          autoComplete={autoComplete}
+          className={`${inp} border-2 border-gray-200 focus:border-gray-400`}
+        />
+        {valid && (
+          <div className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full flex items-center justify-center"
+            style={{ backgroundColor: CHECKMARK_BG }}>
+            <Check className="w-3 h-3" style={{ color: CHECKMARK_TEXT }} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SectionHeader({ num, title, outline = false }: { num: number; title: string; outline?: boolean }) {
+  return (
+    <div className="flex items-center gap-3 mb-4">
+      <div
+        className="w-7 h-7 rounded-full flex items-center justify-center text-sm font-black flex-shrink-0"
+        style={
+          outline
+            ? { backgroundColor: "transparent", border: `2px solid ${SECTION_NUM_BG}`, color: SECTION_NUM_BG }
+            : { backgroundColor: SECTION_NUM_BG, color: SECTION_NUM_TEXT }
+        }
+      >
+        {num}
+      </div>
+      <h2 className="text-lg font-black text-gray-900">{title}</h2>
+    </div>
+  );
+}
+
+// ─── CPF mask ─────────────────────────────────────────────────────────────────
+
+function maskCPF(v: string) {
+  const d = v.replace(/\D/g, "").slice(0, 11);
+  if (d.length <= 3) return d;
+  if (d.length <= 6) return `${d.slice(0,3)}.${d.slice(3)}`;
+  if (d.length <= 9) return `${d.slice(0,3)}.${d.slice(3,6)}.${d.slice(6)}`;
+  return `${d.slice(0,3)}.${d.slice(3,6)}.${d.slice(6,9)}-${d.slice(9)}`;
+}
+function maskCEP(v: string) {
+  const d = v.replace(/\D/g, "").slice(0, 8);
+  if (d.length <= 5) return d;
+  return `${d.slice(0,5)}-${d.slice(5)}`;
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+export default function CheckoutPage() {
+  const { state, total, isHydrated, dispatch } = useCart();
+  const { items } = state;
+  const router = useRouter();
+  const params = useParams<{ step?: string[] }>();
+  const stage = stageFromSegment(params.step?.[0]);
+  const goToStage = useCallback((s: Stage) => router.push(STAGE_PATH[s]), [router]);
+  const [loading, setLoading] = useState(false);
+  const [cepLoading, setCepLoading] = useState(false);
+  const [summaryOpen, setSummaryOpen] = useState(true);
+  // consent removed — hardcoded true in payload
+  const [payMethod, setPayMethod] = useState<PayMethod>("pix");
+  const [pixDiscountPct, setPixDiscountPct] = useState(5);
+  const [checkoutLogo, setCheckoutLogo] = useState("");
+  const [checkoutLogoHeight, setCheckoutLogoHeight] = useState(32);
+  const [freeShippingThreshold, setFreeShippingThreshold] = useState<number | null>(null);
+  const [sectionNumberOutline, setSectionNumberOutline] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/settings")
+      .then((r) => r.json())
+      .then((d: { pixDiscountPct?: number; ve_checkout?: { logoImage?: string; sectionNumberOutline?: boolean }; ve_header?: { logoMobileHeight?: number } }) => {
+        if (typeof d.pixDiscountPct === "number") setPixDiscountPct(d.pixDiscountPct);
+        if (d.ve_checkout?.logoImage) setCheckoutLogo(d.ve_checkout.logoImage);
+        if (typeof d.ve_header?.logoMobileHeight === "number") setCheckoutLogoHeight(d.ve_header.logoMobileHeight);
+        if (typeof d.ve_checkout?.sectionNumberOutline === "boolean") setSectionNumberOutline(d.ve_checkout.sectionNumberOutline);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Fetched independently (not gated behind CEP entry, unlike shippingMethods below)
+  // so the free-shipping progress banner has data from the very first screen.
+  useEffect(() => {
+    fetch("/api/shipping").then((r) => r.json()).then((data: ShippingMethod[]) => {
+      const min = data.reduce((m, x) => (x.freeAbove !== null && x.freeAbove < m ? x.freeAbove : m), Infinity);
+      if (Number.isFinite(min)) setFreeShippingThreshold(min);
+    }).catch(() => {});
+  }, []);
+
+  const [personal, setPersonal] = useState({ name: "", email: "", cpf: "", phone: "", phoneCountry: "55" });
+  const [address, setAddress] = useState({ zipCode: "", street: "", number: "", complement: "", district: "", city: "", state: "" });
+
+  // Restaura identificação/entrega/forma de pagamento se a página recarregar
+  // do zero (ex: navegador em segundo plano) — sem isso, um reload em
+  // /checkout/entrega ou /checkout/pagamento perderia tudo que já foi
+  // preenchido nas etapas anteriores. `formRestored` só vira true depois da
+  // tentativa de restaurar, e a guarda de acesso direto (mais abaixo) espera
+  // esse sinal antes de decidir se redireciona — sem isso, ela rodaria com
+  // os dados ainda vazios do primeiro render e mandaria embora antes da
+  // restauração completar.
+  const [formRestored, setFormRestored] = useState(false);
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem("_checkout_form");
+      if (saved) {
+        const parsed = JSON.parse(saved) as { personal?: typeof personal; address?: typeof address; payMethod?: PayMethod };
+        if (parsed.personal) setPersonal(parsed.personal);
+        if (parsed.address) setAddress(parsed.address);
+        if (parsed.payMethod) setPayMethod(parsed.payMethod);
+      }
+    } catch {}
+    setFormRestored(true);
+  }, []);
+  useEffect(() => {
+    if (!formRestored) return;
+    try { sessionStorage.setItem("_checkout_form", JSON.stringify({ personal, address, payMethod })); } catch {}
+  }, [formRestored, personal, address, payMethod]);
+
+  // Broadcast what the customer is typing (name/email/phone/address only —
+  // never CPF or payment data) so the admin's live session view can show it.
+  // Debounced: fires ~400ms after the last keystroke, not on every character.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try {
+        window.dispatchEvent(new CustomEvent("cs:typing", {
+          detail: {
+            name: personal.name || undefined,
+            email: personal.email || undefined,
+            phone: personal.phone || undefined,
+            address: [address.street, address.number, address.district, address.city, address.state]
+              .filter(Boolean).join(", ") || undefined,
+          },
+        }));
+      } catch {}
+    }, 400);
+    return () => clearTimeout(t);
+  }, [personal.name, personal.email, personal.phone, address.street, address.number, address.district, address.city, address.state]);
+
+  const [shippingMethods, setShippingMethods] = useState<ShippingMethod[]>([]);
+  const [selectedShipping, setSelectedShipping] = useState<ShippingMethod | null>(null);
+
+  const [pixResult,    setPixResult]    = useState<PixResult | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [pixTimer, setPixTimer] = useState(600);
+  const [pixPaid,  setPixPaid]  = useState(false);
+  const [proofFile, setProofFile] = useState<File | null>(null);
+  const [proofSending, setProofSending] = useState(false);
+  const [proofSent, setProofSent] = useState(false);
+  const [proofError, setProofError] = useState("");
+
+  const sendProof = useCallback(async () => {
+    if (!proofFile || !pixResult) return;
+    setProofSending(true);
+    setProofError("");
+    try {
+      const fd = new FormData();
+      fd.append("orderId", pixResult.orderId);
+      fd.append("file", proofFile);
+      const res = await fetch("/api/payments/proof", { method: "POST", body: fd });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) throw new Error(data.error || "Erro ao enviar comprovante");
+      setProofSent(true);
+    } catch (err) {
+      setProofError(err instanceof Error ? err.message : "Erro ao enviar comprovante");
+    } finally {
+      setProofSending(false);
+    }
+  }, [proofFile, pixResult]);
+
+  // Captura fbclid/fbp da URL (vindos da VSL) e dispara InitiateCheckout via CAPI
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const fbclid = params.get("fbclid");
+      const fbpParam = params.get("fbp");
+      if (fbclid) localStorage.setItem("_fbc", `fb.1.${Date.now()}.${fbclid}`);
+      if (fbpParam) localStorage.setItem("_fbp", fbpParam);
+
+      const fbc = fbclid ? `fb.1.${Date.now()}.${fbclid}` : localStorage.getItem("_fbc");
+      const fbp = fbpParam || localStorage.getItem("_fbp");
+      const externalId = localStorage.getItem("_sid") || undefined;
+      const pixelSource = localStorage.getItem("_pxsrc") || undefined;
+
+      fetch("/api/payments/initiate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fbc, fbp, externalId, pixelSource }),
+      }).catch(() => {});
+
+    } catch {}
+  }, []);
+
+  // Restaura os dados do PIX do sessionStorage sempre que existir um pedido
+  // salvo ainda válido — não só na tela /checkout/pix. `pixResult` também é
+  // usado pra decidir se mostra "carrinho vazio" em QUALQUER etapa (o
+  // carrinho fica vazio de propósito depois que o pedido é criado), então
+  // restaurar só na tela do PIX deixava as outras etapas "achando" que não
+  // existe pedido nenhum sempre que a página remontava (ex: botão físico de
+  // voltar do navegador, que reinicia o componente do zero).
+  useEffect(() => {
+    if (!isHydrated) return;
+    try {
+      const saved = sessionStorage.getItem("_pix_result");
+      if (!saved) return;
+      const parsed = JSON.parse(saved) as PixResult & { savedAt: number; timerLeft: number };
+      const elapsed = Math.floor((Date.now() - parsed.savedAt) / 1000);
+      const remaining = (parsed.timerLeft || 600) - elapsed;
+      if (remaining > 0 && !pixResult) {
+        setPixResult(parsed);
+        setPixTimer(remaining);
+      } else if (remaining <= 0) {
+        sessionStorage.removeItem("_pix_result");
+      }
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHydrated, stage]);
+
+  // Acesso direto a uma URL de etapa sem ter passado pela anterior (link
+  // salvo, digitado a mão) — manda de volta pra etapa que realmente precisa
+  // ser preenchida primeiro, em vez de mostrar um formulário pela metade.
+  useEffect(() => {
+    if (!isHydrated || !formRestored) return;
+    if (stage === "endereco" && !personal.name) { router.replace("/checkout"); return; }
+    if (stage === "pagamento" && !address.street) { router.replace(personal.name ? "/checkout/entrega" : "/checkout"); return; }
+    if (stage === "pix" && !pixResult) { router.replace(address.street ? "/checkout/pagamento" : "/checkout"); return; }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHydrated, formRestored, stage, pixResult]);
+
+  const shippingCost = selectedShipping
+    ? (selectedShipping.freeAbove !== null && total >= selectedShipping.freeAbove ? 0 : selectedShipping.price)
+    : 0;
+  const freeShippingReached = freeShippingThreshold !== null && total >= freeShippingThreshold;
+  const missingForFreeShipping = freeShippingThreshold !== null ? Math.max(0, freeShippingThreshold - total) : 0;
+  // Mirrors the server's calculation in /api/payments/create: discount is on
+  // the products only, not on shipping.
+  const discountedTotal = payMethod === "pix" ? total * (1 - pixDiscountPct / 100) : total;
+  const orderTotal = discountedTotal + shippingCost;
+
+  // Load shipping — only once the CEP is valid, so delivery methods/days
+  // don't show up before the customer has entered an address at all.
+  const shippingFetchedRef = useRef(false);
+  useEffect(() => {
+    const cepDigits = address.zipCode.replace(/\D/g, "");
+    if (cepDigits.length !== 8 || shippingFetchedRef.current) return;
+    shippingFetchedRef.current = true;
+    fetch("/api/shipping").then((r) => r.json()).then((data: ShippingMethod[]) => {
+      setShippingMethods(data);
+      if (data.length > 0) setSelectedShipping(data[0]);
+    }).catch(() => { shippingFetchedRef.current = false; });
+  }, [address.zipCode]);
+
+  // PIX countdown
+  useEffect(() => {
+    if (stage !== "pix" || pixPaid) return;
+    const t = setInterval(() => setPixTimer((n) => (n > 0 ? n - 1 : 0)), 1000);
+    return () => clearInterval(t);
+  }, [stage, pixPaid]);
+
+  // PIX polling
+  useEffect(() => {
+    if (stage !== "pix" || !pixResult || pixPaid) return;
+    const t = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/payments/status?orderId=${pixResult.orderId}`);
+        const d = (await r.json()) as { paid: boolean };
+        if (d.paid) { setPixPaid(true); clearInterval(t); try { sessionStorage.removeItem("_pix_result"); } catch {} setTimeout(() => router.push(`/pedido-confirmado/${pixResult.orderNumber}`), 1800); }
+      } catch {}
+    }, 3000);
+    return () => clearInterval(t);
+  }, [stage, pixResult, pixPaid, router]);
+
+  // CEP lookup
+  const lookupCep = useCallback(async (raw: string) => {
+    const cep = raw.replace(/\D/g, "");
+    if (cep.length !== 8) return;
+    setCepLoading(true);
+    try {
+      const r = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
+      const d = (await r.json()) as { erro?: boolean; logradouro?: string; bairro?: string; localidade?: string; uf?: string };
+      if (!d.erro) setAddress((a) => ({ ...a, street: d.logradouro || a.street, district: d.bairro || a.district, city: d.localidade || a.city, state: d.uf || a.state }));
+    } catch {}
+    setCepLoading(false);
+  }, []);
+
+  // Submit
+  const submit = useCallback(async (cardFormData?: unknown) => {
+    setLoading(true);
+    try {
+      // Read UTMs captured by the layout script
+      const utmKeys = ['utm_source','utm_medium','utm_campaign','utm_content','utm_term','src','sck'];
+      const utmData: Record<string, string> = {};
+      try { utmKeys.forEach((k) => { const v = localStorage.getItem('_utm_' + k); if (v) utmData[k] = v; }); } catch {}
+      let fbc: string | null = null; let fbp: string | null = null; let externalId: string | null = null; let pixelSource: string | null = null;
+      try { fbc = localStorage.getItem("_fbc"); fbp = localStorage.getItem("_fbp"); externalId = localStorage.getItem("_sid"); pixelSource = localStorage.getItem("_pxsrc"); } catch {}
+
+      // Brazil (default) keeps the exact format used everywhere downstream
+      // (FlevoPay, admin WhatsApp links) unchanged; only a non-BR country
+      // prepends its code, since that's genuinely a different number shape.
+      const personalToSend = {
+        name: personal.name, email: personal.email, cpf: personal.cpf,
+        phone: personal.phoneCountry !== "55" ? `+${personal.phoneCountry} ${personal.phone}` : personal.phone,
+      };
+
+      const res = await fetch("/api/payments/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          personal: personalToSend, address, paymentMethod: payMethod, cardFormData: cardFormData || null,
+          consent: true, shippingMethodId: selectedShipping?.id || null,
+          utmData: Object.keys(utmData).length > 0 ? utmData : null,
+          fbc, fbp, externalId, pixelSource,
+          cartItems: items.map((i) => ({
+            productId: i.productId, variantId: i.variantId || null, name: i.name,
+            price: i.price, quantity: i.quantity, size: i.size || null, color: i.color || null, image: i.image || null,
+          })),
+        }),
+      });
+      const data = (await res.json()) as { error?: string; orderId?: string; orderNumber?: string; total?: number; qrCode?: string; qrCodeBase64?: string; barcode?: string; pdfUrl?: string | null; status?: string; statusDetail?: string; merchantName?: string };
+      if (!res.ok) throw new Error(data.error || "Erro ao processar pedido");
+      if (payMethod === "pix") {
+        dispatch({ type: "CLEAR" });
+        const pr: PixResult = { orderId: data.orderId!, orderNumber: data.orderNumber!, qrCode: data.qrCode!, qrCodeBase64: data.qrCodeBase64!, total: data.total!, merchantName: data.merchantName };
+        setPixResult(pr);
+        goToStage("pix");
+        try {
+          sessionStorage.setItem("_pix_result", JSON.stringify({ ...pr, savedAt: Date.now(), timerLeft: 600 }));
+        } catch {}
+      } else {
+        if (data.status === "rejected") {
+          // Card declined: keep the cart intact so the customer can fix the
+          // card and retry, instead of getting bounced to "Carrinho vazio".
+          toast({ title: "Cartão recusado", description: data.statusDetail || "Verifique os dados.", variant: "destructive" });
+        } else {
+          dispatch({ type: "CLEAR" });
+          router.push(`/pedido-confirmado/${data.orderNumber}`);
+        }
+      }
+    } catch (err: unknown) {
+      toast({ title: "Erro ao processar pedido", description: err instanceof Error ? err.message : "Tente novamente.", variant: "destructive" });
+    } finally {
+      setLoading(false);
+    }
+  }, [personal, address, payMethod, items, dispatch, router, selectedShipping, goToStage]);
+
+  const copy = async (text: string) => {
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 3000);
+    } else {
+      toast({
+        title: "Não foi possível copiar automaticamente",
+        description: "Toque e segure no código PIX acima para selecionar e copiar manualmente.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // ── Guards ──────────────────────────────────────────────────────────────────
+
+  if (!isHydrated) return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <Loader2 className="w-8 h-8 animate-spin text-gray-300" />
+    </div>
+  );
+
+  // Carrinho vazio só significa "vá fazer compras" quando não existe nenhum
+  // pedido em andamento — depois de gerar o PIX, o carrinho fica vazio de
+  // propósito (foi limpo ao criar o pedido), e a pessoa pode voltar pras
+  // etapas anteriores (entrega, pagamento) pra conferir ou mudar algo, sem
+  // cair numa tela de "carrinho vazio, vá comprar" no meio do próprio pedido.
+  if (items.length === 0 && stage !== "pix" && !pixResult) return (
+    <div className="min-h-screen flex flex-col items-center justify-center gap-4 px-4 text-center bg-gray-50">
+      <ShoppingBag className="w-16 h-16 text-gray-200" />
+      <h2 className="text-xl font-bold text-gray-700">Carrinho vazio</h2>
+      <Link href="/produtos" className="text-sm font-bold underline" style={{ color: STEP_COLOR }}>Ver produtos</Link>
+    </div>
+  );
+
+  // ── PIX ─────────────────────────────────────────────────────────────────────
+
+  if (stage === "pix" && pixResult) {
+    const pm = Math.floor(pixTimer / 60); const ps = pixTimer % 60;
+    const timerPct = Math.round((pixTimer / 600) * 100);
+    return (
+      <div className="min-h-screen" style={{ backgroundColor: "#F5F5F5" }}>
+
+  
+        <div className="max-w-md mx-auto px-4 py-6 space-y-4">
+
+          {pixPaid ? (
+            <div className="bg-white rounded-2xl p-8 text-center shadow-sm">
+              <div className="w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-4" style={{ backgroundColor: "#16c789" }}>
+                <Check className="w-10 h-10 text-white" />
+              </div>
+              <h1 className="text-2xl font-black text-gray-900">Pagamento confirmado!</h1>
+              <p className="text-gray-500 text-sm mt-2">Redirecionando para seu pedido...</p>
+            </div>
+          ) : (
+            <>
+              {/* Card principal */}
+              <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
+                {/* Topo verde */}
+                <div className="px-5 py-4" style={{ backgroundColor: "#16c789" }}>
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center">
+                      <PixIcon size={22} />
+                    </div>
+                    <div>
+                      <p className="text-white font-black text-base leading-tight">Pague com PIX</p>
+                      <p className="text-white/80 text-xs">Aprovação em segundos · Sem taxas</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="px-5 py-5 space-y-5">
+
+                  {/* Valor */}
+                  <div className="flex items-center justify-between bg-gray-50 rounded-xl px-4 py-3">
+                    <div>
+                      <p className="text-xs text-gray-400 font-semibold">Pedido #{pixResult.orderNumber}</p>
+                      <p className="text-2xl font-black text-gray-900 mt-0.5">{formatPrice(pixResult.total)}</p>
+                    </div>
+                    <div className="text-right">
+                      {pixTimer > 0 ? (
+                        <>
+                          <p className="text-xs text-gray-400">Expira em</p>
+                          <p className="font-black text-base" style={{ color: pixTimer < 60 ? "#ef4444" : "#111" }}>
+                            {String(pm).padStart(2,"0")}:{String(ps).padStart(2,"0")}
+                          </p>
+                        </>
+                      ) : (
+                        <p className="text-xs text-red-500 font-bold">Expirado</p>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Barra de progresso do timer */}
+                  <div className="h-1 bg-gray-100 rounded-full overflow-hidden">
+                    <div className="h-full rounded-full transition-all duration-1000" style={{ width: `${timerPct}%`, backgroundColor: pixTimer < 60 ? "#ef4444" : "#16c789" }} />
+                  </div>
+
+                  {/* QR Code */}
+                  {pixResult.qrCodeBase64 && (
+                    <div className="flex flex-col items-center">
+                      <div className="p-3 border-2 border-gray-100 rounded-2xl inline-block">
+                        <img src={`data:image/png;base64,${pixResult.qrCodeBase64}`} alt="QR Code PIX" className="w-48 h-48" />
+                      </div>
+                      <p className="text-xs text-gray-400 mt-2 text-center">Abra o app do seu banco e escaneie</p>
+                    </div>
+                  )}
+
+                  {/* Divisor */}
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 h-px bg-gray-100" />
+                    <span className="text-xs text-gray-400 font-semibold">ou copie o código</span>
+                    <div className="flex-1 h-px bg-gray-100" />
+                  </div>
+
+                  {/* Copia e cola */}
+                  <div>
+                    <textarea
+                      readOnly
+                      value={pixResult.qrCode}
+                      onFocus={(e) => e.target.select()}
+                      rows={2}
+                      className="w-full text-[11px] font-mono text-gray-400 break-all mb-3 bg-gray-50 rounded-lg p-3 resize-none border-0 focus:outline-none focus:ring-1 focus:ring-gray-300"
+                    />
+                    <button onClick={() => copy(pixResult.qrCode)}
+                      className="w-full h-12 flex items-center justify-center gap-2 font-black text-sm rounded-xl transition-all active:scale-[0.98]"
+                      style={{ backgroundColor: "#16c789", color: "#fff" }}>
+                      {copied ? <><Check className="w-4 h-4" /> Copiado!</> : <><Copy className="w-4 h-4" /> Copiar código PIX</>}
+                    </button>
+                  </div>
+
+                  {/* Verificando */}
+                  {pixTimer > 0 && (
+                    <div className="flex items-center justify-center gap-1.5 text-xs text-gray-400">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      Aguardando confirmação do pagamento...
+                    </div>
+                  )}
+                  {pixTimer === 0 && (
+                    <p className="text-center text-sm text-red-500">
+                      PIX expirado.{" "}
+                      <Link href="/checkout" className="underline font-bold">Tentar novamente</Link>
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Como pagar */}
+              <div className="bg-white rounded-2xl shadow-sm px-5 py-4">
+                <p className="text-xs font-black text-gray-500 uppercase tracking-wide mb-3">Como pagar</p>
+                <div className="space-y-3">
+                  {[
+                    { n: "1", t: "Abra o app do seu banco ou carteira digital" },
+                    { n: "2", t: "Escolha pagar via PIX com QR Code ou Copia e Cola" },
+                    { n: "3", t: "Confirme o valor e finalize o pagamento" },
+                  ].map(({ n, t }) => (
+                    <div key={n} className="flex items-start gap-3">
+                      <div className="w-6 h-6 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-black text-white" style={{ backgroundColor: "#16c789" }}>{n}</div>
+                      <p className="text-sm text-gray-600 pt-0.5">{t}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* CNPJ / identidade do beneficiário */}
+              <div className="bg-white rounded-2xl shadow-sm px-5 py-4">
+                <div className="flex items-start gap-3">
+                  <ShieldCheck className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: "#16c789" }} />
+                  <div>
+                    <p className="text-xs font-black text-gray-700">Beneficiário do pagamento</p>
+                    <p className="text-sm font-bold text-gray-900 mt-0.5">{pixResult.merchantName || "PAGO COMERCIO DIGITAL E R"}</p>
+                    <p className="text-xs text-gray-400 mt-0.5">Os pagamentos são processados exclusivamente em nome deste CNPJ. Verifique no app do seu banco antes de confirmar.</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Anexar comprovante */}
+              <div className="bg-white rounded-2xl shadow-sm px-5 py-4">
+                <div className="flex items-start gap-3 mb-3">
+                  <Paperclip className="w-5 h-5 flex-shrink-0 mt-0.5 text-gray-400" />
+                  <div>
+                    <p className="text-xs font-black text-gray-700">Já pagou?</p>
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      Isso é opcional — anexar o comprovante só ajuda a confirmar seu pagamento mais rápido.
+                    </p>
+                  </div>
+                </div>
+                {proofSent ? (
+                  <div className="flex items-center gap-2 text-sm font-bold text-green-600 bg-green-50 border border-green-200 rounded-xl px-4 py-3">
+                    <Check className="w-4 h-4 flex-shrink-0" /> Comprovante enviado, obrigado!
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <label className="flex items-center justify-center gap-2 w-full h-11 border-2 border-dashed border-gray-200 rounded-xl text-sm font-semibold text-gray-500 cursor-pointer hover:border-gray-300 transition-colors">
+                      {proofFile ? proofFile.name : "Escolher arquivo (imagem ou PDF)"}
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,application/pdf"
+                        className="hidden"
+                        onChange={(e) => { setProofFile(e.target.files?.[0] || null); setProofError(""); }}
+                      />
+                    </label>
+                    {proofError && <p className="text-xs text-red-500">{proofError}</p>}
+                    <button
+                      onClick={sendProof}
+                      disabled={!proofFile || proofSending}
+                      className="w-full h-11 flex items-center justify-center gap-2 font-black text-sm rounded-xl transition-all active:scale-[0.98] disabled:opacity-40"
+                      style={{ backgroundColor: "#111", color: "#fff" }}
+                    >
+                      {proofSending ? <><Loader2 className="w-4 h-4 animate-spin" /> Enviando...</> : "Enviar comprovante"}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Rodapé de segurança */}
+              <div className="text-center pb-2">
+                <p className="text-[11px] text-gray-400">
+                  Ambiente seguro · Pagamento processado com segurança
+                </p>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Boleto ───────────────────────────────────────────────────────────────────
+
+  // ── Steps ────────────────────────────────────────────────────────────────────
+
+  const stepIdx = stage === "dados" ? 0 : stage === "endereco" ? 1 : 2;
+
+  // Validation booleans
+  const vName  = personal.name.trim().split(" ").length >= 2;
+  const vEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(personal.email);
+  const vCpf   = personal.cpf.replace(/\D/g,"").length === 11;
+  const vPhone = personal.phone.replace(/\D/g,"").length >= 10;
+  const vZip   = address.zipCode.replace(/\D/g,"").length === 8;
+  const vStreet = address.street.trim().length > 0;
+  const vNum   = address.number.trim().length > 0;
+  const vDist  = address.district.trim().length > 0;
+  const vCity  = address.city.trim().length > 0;
+  const vState = address.state.trim().length === 2;
+
+  return (
+    <div className="min-h-[100dvh] flex flex-col" style={{ backgroundColor: "var(--vep-checkout-page-bg,#F5F5F5)" }}>
+
+      {/* ── Top header ──────────────────────────────────────────────────────── */}
+      {checkoutLogo && (
+        <div className="border-b flex-shrink-0" style={{ backgroundColor: "var(--vep-checkout-header-bg,#fff)" }}>
+          <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-center">
+            <Image
+              src={checkoutLogo}
+              alt="Logo"
+              width={200}
+              height={checkoutLogoHeight}
+              style={{ height: `${checkoutLogoHeight}px`, width: "auto", objectFit: "contain" }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* ── Urgency banner ──────────────────────────────────────────────────── */}
+      <div className="bg-white border-b flex-shrink-0">
+        <div className="max-w-lg mx-auto px-4 py-3 text-center">
+          {freeShippingReached ? (
+            <>
+              <p className="font-black text-base text-gray-900">
+                Frete grátis desbloqueado!
+              </p>
+              <p className="text-sm text-gray-600 mt-0.5 flex items-center justify-center gap-2 flex-wrap">
+                Garanta em <CountdownTimer seconds={300} /> antes que expire
+              </p>
+            </>
+          ) : freeShippingThreshold !== null ? (
+            <p className="font-black text-base text-gray-900">
+              Faltam {formatPrice(missingForFreeShipping)} para o frete grátis!
+            </p>
+          ) : (
+            <>
+              <p className="font-black text-base text-gray-900">
+                Desconto e Frete grátis apenas hoje!
+              </p>
+              <p className="text-sm text-gray-600 mt-0.5 flex items-center justify-center gap-2 flex-wrap">
+                Você tem <CountdownTimer seconds={300} /> para finalizar seu pedido
+              </p>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* ── Scrollable content ──────────────────────────────────────────────── */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-lg mx-auto px-4 pt-5 pb-6">
+
+          {/* Security note — at the start of the steps */}
+          <div className="flex items-center justify-center gap-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-3">
+            <ShieldCheck className="w-3 h-3" style={{ color: "#16c789" }} />
+            <span>Pagamento 100% seguro</span>
+          </div>
+
+          {/* Step bar */}
+          <StepBar step={stepIdx as 0 | 1 | 2} />
+
+          {/* ── RESUMO accordion ──────────────────────────────────────────── */}
+          <div className="bg-white rounded-xl border mb-4 overflow-hidden">
+            <button
+              onClick={() => setSummaryOpen((o) => !o)}
+              className="w-full flex items-center justify-between px-4 py-3 text-xs font-black tracking-widest text-gray-500 uppercase"
+            >
+              <span>Resumo</span>
+              {summaryOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </button>
+            {summaryOpen && (
+              <div className="px-4 pb-4 border-t">
+                <div className="space-y-4 pt-3">
+                  {items.map((item) => (
+                    <div key={item.id} className="flex gap-3">
+                      <div className="relative w-16 h-16 flex-shrink-0 rounded-lg overflow-hidden border bg-white">
+                        <Image src={item.image || "/placeholder-product.jpg"} alt={item.name} fill className="object-contain p-1" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="font-semibold text-sm text-gray-900 leading-tight">{item.name}</p>
+                        {(item.color || item.size) && (
+                          <p className="text-xs text-gray-500 mt-0.5 font-semibold">
+                            {[item.color, item.size].filter(Boolean).join(" / ")}
+                          </p>
+                        )}
+                        <p className="text-xs text-gray-500 mt-1">Qtd.: {item.quantity} &nbsp;{formatPrice(item.price * item.quantity)}</p>
+                        {/* Qty controls */}
+                        <div className="flex items-center gap-2 mt-2">
+                          <div className="flex items-center border rounded-lg overflow-hidden">
+                            <button
+                              onClick={() => dispatch({ type: "UPDATE_QUANTITY", payload: { id: item.id, quantity: item.quantity - 1 } })}
+                              className="w-8 h-8 flex items-center justify-center hover:bg-gray-100 transition-colors"
+                            ><Minus className="w-3 h-3" /></button>
+                            <span className="w-6 text-center text-sm font-bold">{item.quantity}</span>
+                            <button
+                              onClick={() => dispatch({ type: "UPDATE_QUANTITY", payload: { id: item.id, quantity: item.quantity + 1 } })}
+                              className="w-8 h-8 flex items-center justify-center hover:bg-gray-100 transition-colors"
+                            ><Plus className="w-3 h-3" /></button>
+                          </div>
+                          <button
+                            onClick={() => dispatch({ type: "REMOVE_ITEM", payload: item.id })}
+                            className="text-xs text-gray-400 underline hover:text-red-500 transition-colors"
+                          >Remover produto</button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="border-t mt-4 pt-3 space-y-1.5">
+                  <div className="flex justify-between text-sm text-gray-600">
+                    <span>Produto</span><span>{formatPrice(total)}</span>
+                  </div>
+                  {selectedShipping && stage !== "dados" && (
+                    <div className="flex justify-between text-sm text-gray-600">
+                      <span>Frete</span>
+                      <span>{shippingCost === 0 ? <span style={{ color: STEP_COLOR }}>Grátis</span> : formatPrice(shippingCost)}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between font-black text-base">
+                    <span>Total</span>
+                    <span className="text-gray-900">{formatPrice(orderTotal)}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* ── Step 1: Dados ──────────────────────────────────────────────── */}
+          {stage === "dados" && (
+            <div className="bg-white rounded-xl border p-4">
+              <div className="flex items-center justify-between mb-1">
+                <SectionHeader num={1} title="Identificação" outline={sectionNumberOutline} />
+                <Link
+                  href="/carrinho"
+                  className="flex items-center gap-1.5 text-sm font-bold px-3 py-1.5 rounded-lg border-2 border-gray-200 text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition-colors"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  Voltar ao carrinho
+                </Link>
+              </div>
+              <p className="text-xs text-gray-500 mb-4 -mt-2 leading-relaxed">
+                Utilizaremos seu e-mail para: identificar seu perfil, histórico de compra, notificação de pedidos e carrinho de compras.
+              </p>
+              <div className="space-y-3">
+                <ValidatedInput label="Nome completo" required valid={vName}
+                  value={personal.name} onChange={(v) => setPersonal((p) => ({ ...p, name: v }))}
+                  placeholder="João da Silva" autoComplete="name" />
+                <ValidatedInput label="E-mail" required valid={vEmail} type="email"
+                  value={personal.email} onChange={(v) => setPersonal((p) => ({ ...p, email: v }))}
+                  placeholder="joao@email.com" inputMode="email" autoComplete="email" />
+                <ValidatedInput label="CPF" required valid={vCpf}
+                  value={personal.cpf} onChange={(v) => setPersonal((p) => ({ ...p, cpf: maskCPF(v) }))}
+                  placeholder="000.000.000-00" inputMode="numeric" />
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1">
+                    Celular / WhatsApp<span className="text-red-500 ml-0.5">*</span>
+                  </label>
+                  <div className="flex gap-2">
+                    <CountryCodeSelect
+                      value={personal.phoneCountry}
+                      onChange={(code) => setPersonal((p) => ({ ...p, phoneCountry: code }))}
+                    />
+                    <div className="relative flex-1">
+                      <input
+                        type="tel" value={personal.phone}
+                        onChange={(e) => setPersonal((p) => ({ ...p, phone: maskLocalPhone(e.target.value) }))}
+                        placeholder="(11) 99999-9999" inputMode="tel" autoComplete="tel"
+                        className={`${inp} border-2 border-gray-200 focus:border-gray-400`}
+                      />
+                      {vPhone && (
+                        <div className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full flex items-center justify-center"
+                          style={{ backgroundColor: CHECKMARK_BG }}>
+                          <Check className="w-3 h-3" style={{ color: CHECKMARK_TEXT }} />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── Step 2: Entrega ────────────────────────────────────────────── */}
+          {stage === "endereco" && (
+            <div className="bg-white rounded-xl border p-4">
+              <SectionHeader num={2} title="Entrega" outline={sectionNumberOutline} />
+              <div className="space-y-3">
+                <div className="relative">
+                  <ValidatedInput label="CEP" required valid={vZip}
+                    value={address.zipCode}
+                    onChange={(v) => { const m = maskCEP(v); setAddress((a) => ({ ...a, zipCode: m })); if (m.replace(/\D/g,"").length === 8) lookupCep(m); }}
+                    placeholder="00000-000" inputMode="numeric" maxLength={9} />
+                  {cepLoading && <div className="absolute right-3 bottom-3"><Loader2 className="w-4 h-4 animate-spin text-gray-400" /></div>}
+                  {!vZip && (
+                    <p className="text-xs text-gray-400 mt-1">Coloque seu CEP para calcular o frete</p>
+                  )}
+                </div>
+                <ValidatedInput label="Rua / Avenida" required valid={vStreet}
+                  value={address.street} onChange={(v) => setAddress((a) => ({ ...a, street: v }))}
+                  placeholder="Rua das Flores" autoComplete="address-line1" />
+                <div className="grid grid-cols-5 gap-2">
+                  <div className="col-span-2">
+                    <ValidatedInput label="Número" required valid={vNum}
+                      value={address.number} onChange={(v) => setAddress((a) => ({ ...a, number: v }))}
+                      placeholder="123" inputMode="numeric" />
+                  </div>
+                  <div className="col-span-3">
+                    <ValidatedInput label="Complemento"
+                      value={address.complement} onChange={(v) => setAddress((a) => ({ ...a, complement: v }))}
+                      placeholder="Apto, bloco..." />
+                  </div>
+                </div>
+                <ValidatedInput label="Bairro" required valid={vDist}
+                  value={address.district} onChange={(v) => setAddress((a) => ({ ...a, district: v }))}
+                  placeholder="Centro" />
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="col-span-2">
+                    <ValidatedInput label="Cidade" required valid={vCity}
+                      value={address.city} onChange={(v) => setAddress((a) => ({ ...a, city: v }))}
+                      placeholder="São Paulo" autoComplete="address-level2" />
+                  </div>
+                  <div>
+                    <ValidatedInput label="UF" required valid={vState}
+                      value={address.state} onChange={(v) => setAddress((a) => ({ ...a, state: v.toUpperCase() }))}
+                      placeholder="SP" maxLength={2} autoComplete="address-level1" />
+                  </div>
+                </div>
+
+                {/* Shipping options */}
+                {shippingMethods.length > 0 && (
+                  <div className="pt-2">
+                    <p className="text-sm font-bold text-gray-700 mb-2">Método de entrega</p>
+                    <div className="space-y-2">
+                      {shippingMethods.map((m) => {
+                        const effectivePrice = m.freeAbove !== null && total >= m.freeAbove ? 0 : m.price;
+                        const isSelected = selectedShipping?.id === m.id;
+                        return (
+                          <button key={m.id} onClick={() => setSelectedShipping(m)}
+                            className="w-full flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-all"
+                            style={{ borderColor: isSelected ? STEP_COLOR : "#E5E7EB", backgroundColor: isSelected ? "rgba(22,199,137,0.05)" : "#fff" }}>
+                            <div className="w-5 h-5 rounded-full border-2 flex-shrink-0 flex items-center justify-center"
+                              style={{ borderColor: isSelected ? STEP_COLOR : "#D1D5DB" }}>
+                              {isSelected && <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: STEP_COLOR }} />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="font-bold text-sm text-gray-900">{m.name}</p>
+                              {(m.minDays || m.maxDays) && (
+                                <p className="text-xs text-gray-500">
+                                  {m.minDays === m.maxDays || !m.maxDays ? `${m.minDays} dias úteis` : `${m.minDays}–${m.maxDays} dias úteis`}
+                                </p>
+                              )}
+                            </div>
+                            <span className="font-black text-sm flex-shrink-0"
+                              style={{ color: effectivePrice === 0 ? STEP_COLOR : "#111" }}>
+                              {effectivePrice === 0 ? "Grátis" : formatPrice(effectivePrice)}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ── Step 3: Pagamento ──────────────────────────────────────────── */}
+          {stage === "pagamento" && (
+            <div className="bg-white rounded-xl border p-4 space-y-4">
+              <SectionHeader num={3} title="Pagamento" outline={sectionNumberOutline} />
+              <div className="space-y-2">
+                {([
+                  { id: "pix",  label: "PIX",               desc: "Aprovação instantânea · Sem taxas", badge: "Recomendado" },
+                  { id: "card", label: "Cartão de crédito", desc: "Parcelamento em até 12x",           badge: null },
+                ] as { id: PayMethod; label: string; desc: string; badge: string | null }[]).map((m) => (
+                  <button key={m.id} onClick={() => setPayMethod(m.id)}
+                    className="w-full flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-all"
+                    style={{ borderColor: payMethod === m.id ? "#111" : "#E5E7EB", backgroundColor: payMethod === m.id ? "#F9FAFB" : "#fff" }}>
+                    <div className="w-5 h-5 rounded-full border-2 flex-shrink-0 flex items-center justify-center"
+                      style={{ borderColor: payMethod === m.id ? "#111" : "#D1D5DB" }}>
+                      {payMethod === m.id && <div className="w-2.5 h-2.5 rounded-full bg-gray-900" />}
+                    </div>
+                    <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors"
+                      style={{ backgroundColor: m.id === "pix" ? (payMethod === "pix" ? "#32BCAD" : "#E8F8F6") : (payMethod === "card" ? "#111" : "#F3F4F6"), color: m.id === "pix" ? (payMethod === "pix" ? "#fff" : "#32BCAD") : (payMethod === "card" ? "#fff" : "#6B7280") }}>
+                      {m.id === "pix" ? <PixIcon size={20} /> : <CreditCard className="w-5 h-5" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold text-sm text-gray-900">{m.label}</span>
+                        {m.badge && <span className="text-[10px] font-black px-2 py-0.5 rounded-full text-white" style={{ backgroundColor: "#16c789" }}>{m.badge}</span>}
+                      </div>
+                      <p className="text-xs text-gray-500">{m.desc}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+
+              {payMethod === "card" && (
+                <div className="border-2 border-gray-100 rounded-xl p-5 text-center space-y-1.5 bg-gray-50">
+                  <p className="text-sm font-semibold text-gray-700">Temporariamente indisponível — sistema em atualização</p>
+                  <p className="text-sm text-gray-500">Por favor, utilize o <strong>PIX</strong> para finalizar seu pedido.</p>
+                </div>
+              )}
+
+              {/* Rastreio */}
+              <div className="flex items-center gap-3 rounded-xl px-4 py-3.5" style={{ backgroundColor: "#f0fdf4", border: "1.5px solid #16c789" }}>
+                <span className="text-2xl">📦</span>
+                <p className="text-sm font-semibold leading-snug" style={{ color: "#14532d" }}>
+                  Após o pagamento você receberá o <strong>código de rastreio</strong> para acompanhar a entrega do seu pedido.
+                </p>
+              </div>
+
+              {/* Order summary inline */}
+              <div className="border-t pt-3 space-y-1.5 text-sm">
+                <div className="flex justify-between text-gray-600"><span>Produto</span><span>{formatPrice(total)}</span></div>
+                {selectedShipping && (
+                  <div className="flex justify-between text-gray-600">
+                    <span>Frete ({selectedShipping.name})</span>
+                    <span>{shippingCost === 0 ? <span style={{ color: STEP_COLOR }}>Grátis</span> : formatPrice(shippingCost)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between font-black text-base">
+                  <span>Total</span><span className="text-gray-900">{formatPrice(orderTotal)}</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Sticky CTA footer ───────────────────────────────────────────────── */}
+      <div className="flex-shrink-0 bg-white border-t shadow-lg">
+        <div className="max-w-lg mx-auto p-4 space-y-2">
+          {stage === "dados" && (
+            <button
+              onClick={() => {
+                if (!vName || !vEmail || !vCpf || !vPhone) {
+                  toast({ title: "Preencha todos os campos obrigatórios", variant: "destructive" });
+                  return;
+                }
+                goToStage("endereco");
+              }}
+              className="w-full h-14 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-[0.98] shadow-md"
+              style={{ backgroundColor: "var(--vep-checkout-continue-bg,#16c789)", color: "var(--vep-checkout-continue-text,#fff)", fontSize: "1rem", fontWeight: 700, letterSpacing: "0.01em" }}
+            >
+              Ir para a entrega &nbsp;→
+            </button>
+          )}
+          {stage === "endereco" && (
+            <>
+              <button
+                onClick={() => {
+                  if (!vZip || !vStreet || !vNum || !vDist || !vCity || !vState) {
+                    toast({ title: "Preencha o endereço completo", variant: "destructive" }); return;
+                  }
+                  if (shippingMethods.length > 0 && !selectedShipping) {
+                    toast({ title: "Selecione um método de entrega", variant: "destructive" }); return;
+                  }
+                  goToStage("pagamento");
+                }}
+                className="w-full h-14 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-[0.98] shadow-md"
+                style={{ backgroundColor: "var(--vep-checkout-continue-bg,#16c789)", color: "var(--vep-checkout-continue-text,#fff)", fontSize: "1rem", fontWeight: 700, letterSpacing: "0.01em" }}
+              >
+                Ir para o pagamento &nbsp;→
+              </button>
+              <button
+                onClick={() => goToStage("dados")}
+                className="w-full h-10 rounded-xl flex items-center justify-center gap-1.5 text-sm font-semibold text-gray-500 hover:text-gray-700 transition-colors"
+              >
+                ← Voltar para identificação
+              </button>
+            </>
+          )}
+          {stage === "pagamento" && (
+            <>
+              <button
+                onClick={() => submit()}
+                disabled={loading || payMethod === "card"}
+                className="w-full h-14 rounded-xl flex items-center justify-center gap-2 disabled:opacity-50 transition-all active:scale-[0.98] shadow-md"
+                style={{ backgroundColor: "var(--vep-checkout-cta-bg,#16c789)", color: "var(--vep-checkout-cta-text,#fff)", fontSize: "1rem", fontWeight: 700, letterSpacing: "0.01em" }}
+              >
+                {loading
+                  ? <><Loader2 className="w-5 h-5 animate-spin" /> Processando...</>
+                  : <>Finalizar pedido &nbsp;→</>}
+              </button>
+              <button
+                onClick={() => goToStage("endereco")}
+                disabled={loading}
+                className="w-full h-10 rounded-xl flex items-center justify-center gap-1.5 text-sm font-semibold text-gray-500 hover:text-gray-700 disabled:opacity-40 transition-colors"
+              >
+                ← Voltar para entrega
+              </button>
+            </>
+          )}
+          <div className="flex items-center justify-center gap-1.5 text-[11px] text-gray-400">
+            <ShieldCheck className="w-3.5 h-3.5" style={{ color: "#16c789" }} />
+            Pagamento 100% seguro
+          </div>
+        </div>
+      </div>
+
+      {/* Upsell — shown only on stages before pix */}
+      {stage !== "pix" && (
+        <div className="max-w-lg mx-auto px-4 pb-10">
+          <CartReviews />
+        </div>
+      )}
+    </div>
+  );
+}

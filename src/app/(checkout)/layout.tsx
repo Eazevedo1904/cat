@@ -1,0 +1,41 @@
+import { prisma } from "@/lib/prisma";
+import { PresenceTracker } from "@/components/store/PresenceTracker";
+import { SessionRecorder } from "@/components/store/SessionRecorder";
+
+export const dynamic = "force-dynamic";
+
+export default async function CheckoutLayout({ children }: { children: React.ReactNode }) {
+  const settings = await prisma.siteSetting.findMany();
+  const sm = Object.fromEntries(settings.map((s) => {
+    try { return [s.key, JSON.parse(s.value)]; } catch { return [s.key, s.value]; }
+  }));
+
+  const ck = (sm.ve_checkout || {}) as Record<string, string>;
+
+  const css = [
+    `--vep-checkout-step-active-bg:${ck.stepActiveBg || "#16c789"}`,
+    `--vep-checkout-step-active-text:${ck.stepActiveText || "#ffffff"}`,
+    `--vep-checkout-step-done-bg:${ck.stepDoneBg || "#16c789"}`,
+    `--vep-checkout-step-done-text:${ck.stepDoneText || "#ffffff"}`,
+    `--vep-checkout-section-num-bg:${ck.sectionNumberBg || "#FFCD11"}`,
+    `--vep-checkout-section-num-text:${ck.sectionNumberText || "#000000"}`,
+    `--vep-checkout-checkmark-bg:${ck.checkmarkBg || "#16c789"}`,
+    `--vep-checkout-checkmark-text:${ck.checkmarkText || "#ffffff"}`,
+    `--vep-checkout-continue-bg:${ck.continueBg || "#16c789"}`,
+    `--vep-checkout-continue-text:${ck.continueText || "#ffffff"}`,
+    `--vep-checkout-cta-bg:${ck.ctaBg || "#16c789"}`,
+    `--vep-checkout-cta-text:${ck.ctaText || "#ffffff"}`,
+    `--vep-checkout-header-bg:${ck.headerBg || "#ffffff"}`,
+    `--vep-checkout-page-bg:${ck.pageBg || "#F5F5F5"}`,
+  ].join(";");
+
+  return (
+    <>
+      <style suppressHydrationWarning dangerouslySetInnerHTML={{ __html: `:root{${css}}` }} />
+      <script suppressHydrationWarning dangerouslySetInnerHTML={{ __html: `(function(){try{var p=new URLSearchParams(window.location.search);var fbclid=p.get('fbclid');if(fbclid)localStorage.setItem('_fbc','fb.1.'+Date.now()+'.'+fbclid);var fbp=p.get('fbp');if(fbp)localStorage.setItem('_fbp',fbp);var px=p.get('px');if(px)localStorage.setItem('_pxsrc',px);var vsid=p.get('sid');if(vsid){localStorage.setItem('_sid',vsid);}else if(!localStorage.getItem('_sid')){localStorage.setItem('_sid',Math.random().toString(36).slice(2)+Date.now().toString(36));}}catch(e){}})();` }} />
+      <PresenceTracker />
+      <SessionRecorder />
+      {children}
+    </>
+  );
+}

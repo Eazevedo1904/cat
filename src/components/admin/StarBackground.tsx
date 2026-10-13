@@ -1,0 +1,163 @@
+"use client";
+
+import { useEffect, useRef } from "react";
+
+interface Star {
+  x: number; y: number;
+  size: number;
+  baseOpacity: number;
+  driftX: number; driftY: number;
+  twinkleOffset: number;
+}
+
+export function StarBackground() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const mouseRef = useRef({ x: 0.5, y: 0.5 });
+  const targetMouseRef = useRef({ x: 0.5, y: 0.5 });
+  const starsRef = useRef<Star[]>([]);
+  const rafRef = useRef<number>();
+  const lastTimeRef = useRef(0);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const parent = canvas.parentElement!;
+
+    const c = canvas;
+    const cx = ctx;
+    function resize() {
+      c.width = parent.offsetWidth;
+      c.height = parent.offsetHeight;
+    }
+    resize();
+    const ro = new ResizeObserver(resize);
+    ro.observe(parent);
+
+    starsRef.current = Array.from({ length: 180 }, () => ({
+      x: Math.random(), y: Math.random(),
+      size: Math.random() * 1.8 + 0.3,
+      baseOpacity: Math.random() * 0.65 + 0.2,
+      // 3× faster drift than before
+      driftX: (Math.random() - 0.5) * 16,
+      driftY: (Math.random() - 0.5) * 16,
+      twinkleOffset: Math.random() * Math.PI * 2,
+    }));
+
+    function frame(now: number) {
+      const dt = Math.min((now - lastTimeRef.current) / 1000, 0.05);
+      lastTimeRef.current = now;
+
+      // Faster mouse interpolation
+      const lerp = 0.08;
+      mouseRef.current.x += (targetMouseRef.current.x - mouseRef.current.x) * lerp;
+      mouseRef.current.y += (targetMouseRef.current.y - mouseRef.current.y) * lerp;
+
+      const W = c.width;
+      const H = c.height;
+      const mx = mouseRef.current.x - 0.5;
+      const my = mouseRef.current.y - 0.5;
+
+      cx.clearRect(0, 0, W, H);
+
+      const pos: [number, number][] = [];
+
+      for (const star of starsRef.current) {
+        // Faster drift
+        star.x += (star.driftX * dt) / W;
+        star.y += (star.driftY * dt) / H;
+        if (star.x < 0) star.x += 1;
+        if (star.x > 1) star.x -= 1;
+        if (star.y < 0) star.y += 1;
+        if (star.y > 1) star.y -= 1;
+
+        // Faster twinkle
+        const twinkle = Math.sin(now * 0.0018 + star.twinkleOffset) * 0.18;
+        const opacity = Math.max(0, star.baseOpacity + twinkle);
+
+        // Stronger parallax
+        const px = star.x * W + mx * star.size * 28;
+        const py = star.y * H + my * star.size * 20;
+
+        pos.push([px, py]);
+
+        // Core glow for bigger stars
+        if (star.size > 1.2) {
+          const grd = cx.createRadialGradient(px, py, 0, px, py, star.size * 3);
+          grd.addColorStop(0, `rgba(167,139,250,${(opacity * 0.4).toFixed(2)})`);
+          grd.addColorStop(1, "rgba(167,139,250,0)");
+          cx.beginPath();
+          cx.arc(px, py, star.size * 3, 0, Math.PI * 2);
+          cx.fillStyle = grd;
+          cx.fill();
+        }
+
+        cx.beginPath();
+        cx.arc(px, py, star.size, 0, Math.PI * 2);
+        cx.fillStyle = `rgba(255,255,255,${opacity.toFixed(2)})`;
+        cx.fill();
+      }
+
+      // Brighter constellation lines with wider range
+      cx.lineWidth = 0.6;
+      const MAX_DIST = 190;
+      for (let i = 0; i < pos.length; i++) {
+        for (let j = i + 1; j < pos.length; j++) {
+          const dx = pos[i][0] - pos[j][0];
+          const dy = pos[i][1] - pos[j][1];
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d < MAX_DIST) {
+            const alpha = ((1 - d / MAX_DIST) * 0.28).toFixed(3);
+            cx.beginPath();
+            cx.moveTo(pos[i][0], pos[i][1]);
+            cx.lineTo(pos[j][0], pos[j][1]);
+            cx.strokeStyle = `rgba(167,139,250,${alpha})`;
+            cx.stroke();
+          }
+        }
+      }
+
+      rafRef.current = requestAnimationFrame(frame);
+    }
+
+    rafRef.current = requestAnimationFrame((t) => {
+      lastTimeRef.current = t;
+      rafRef.current = requestAnimationFrame(frame);
+    });
+
+    function onMouseMove(e: MouseEvent) {
+      targetMouseRef.current = {
+        x: e.clientX / window.innerWidth,
+        y: e.clientY / window.innerHeight,
+      };
+    }
+    function onTouchMove(e: TouchEvent) {
+      if (e.touches[0]) {
+        targetMouseRef.current = {
+          x: e.touches[0].clientX / window.innerWidth,
+          y: e.touches[0].clientY / window.innerHeight,
+        };
+      }
+    }
+
+    window.addEventListener("mousemove", onMouseMove, { passive: true });
+    window.addEventListener("touchmove", onTouchMove, { passive: true });
+
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("touchmove", onTouchMove);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+  }, []);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="absolute inset-0 w-full h-full"
+      style={{ pointerEvents: "none" }}
+      aria-hidden
+    />
+  );
+}

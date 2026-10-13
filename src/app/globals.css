@@ -1,0 +1,92 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Prevent horizontal overflow on mobile — including iOS Safari */
+html {
+  overflow-x: hidden;
+  width: 100%;
+  /* Stops Android Chrome from treating a horizontal swipe (e.g. on the
+     product photo gallery) as a page-level overscroll/back-navigation
+     gesture, which visually "kicks" the whole page off-screen. */
+  overscroll-behavior-x: none;
+}
+body {
+  overflow-x: hidden;
+  width: 100%;
+  max-width: 100%;
+  position: relative; /* required for iOS Safari overflow-x: hidden to clip children */
+  overscroll-behavior-x: none;
+}
+
+/* Hide scrollbar utility */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* Gallery swipe animations — use clip-path so transform never causes page overflow */
+@keyframes slideFromRight {
+  from { opacity: 0; clip-path: inset(0 0 0 15%); }
+  to   { opacity: 1; clip-path: inset(0 0 0 0); }
+}
+@keyframes slideFromLeft {
+  from { opacity: 0; clip-path: inset(0 15% 0 0); }
+  to   { opacity: 1; clip-path: inset(0 0 0 0); }
+}
+.slide-from-right { animation: slideFromRight 0.2s ease-out; }
+.slide-from-left  { animation: slideFromLeft  0.2s ease-out; }
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 47 100% 54%;
+    --primary-foreground: 0 0% 0%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 47 100% 54%;
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+::-webkit-scrollbar-thumb {
+  background: #c7c7c7;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
+}

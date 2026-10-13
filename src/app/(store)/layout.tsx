@@ -1,0 +1,115 @@
+import { Header } from "@/components/store/Header";
+import { Footer } from "@/components/store/Footer";
+import { NewsletterBanner } from "@/components/store/NewsletterBanner";
+import { prisma } from "@/lib/prisma";
+import { MetaPageView } from "@/components/store/MetaPageView";
+import { PresenceTracker } from "@/components/store/PresenceTracker";
+import { SessionRecorder } from "@/components/store/SessionRecorder";
+import { MirrorReceiver } from "@/components/store/MirrorReceiver";
+
+export const revalidate = 60;
+
+function bool(v: unknown, def = true): boolean {
+  if (v === undefined || v === null) return def;
+  return v === true || v === "true";
+}
+
+export default async function StoreLayout({ children }: { children: React.ReactNode }) {
+  const [headerMenu, footerMenu, settings] = await Promise.all([
+    prisma.menu.findUnique({
+      where: { location: "header" },
+      include: { items: { orderBy: { order: "asc" } } },
+    }),
+    prisma.menu.findUnique({
+      where: { location: "footer" },
+      include: { items: { orderBy: { order: "asc" } } },
+    }),
+    prisma.siteSetting.findMany(),
+  ]);
+
+  const sm = Object.fromEntries(settings.map((s) => {
+    try { return [s.key, JSON.parse(s.value)]; } catch { return [s.key, s.value]; }
+  }));
+
+  const vh = (sm.ve_header || {}) as Record<string, unknown>;
+  const va = (sm.ve_announcement || {}) as Record<string, unknown>;
+  const vf = (sm.ve_footer || {}) as Record<string, unknown>;
+  const vpp = (sm.ve_product_page || {}) as Record<string, string>;
+  const vc = (sm.ve_cart || {}) as Record<string, string>;
+
+  const globalCss = [
+    `--vep-badge-bg:${vpp.badgeBg || "#EF4444"}`,
+    `--vep-badge-text:${vpp.badgeText || "#FFFFFF"}`,
+    `--vep-drawer-header-bg:${vc.headerBg || "#000000"}`,
+    `--vep-drawer-header-text:${vc.headerText || "#ffffff"}`,
+    `--vep-drawer-btn-bg:${vc.btnBg || "#FFCD11"}`,
+    `--vep-drawer-btn-text:${vc.btnText || "#000000"}`,
+    `--vep-drawer-bg:${vc.drawerBg || "#ffffff"}`,
+    `--vep-quickadd-bg:${vc.quickaddBg || "#16c789"}`,
+    `--vep-quickadd-text:${vc.quickaddText || "#ffffff"}`,
+    `--vep-quickadd-ring:${vc.quickaddRing || "transparent"}`,
+    `--vep-cart-page-btn-bg:${vc.cartPageBtnBg || "#FFCD11"}`,
+    `--vep-cart-page-btn-text:${vc.cartPageBtnText || "#000000"}`,
+  ].join(";");
+
+  return (
+    <div className="flex flex-col min-h-screen overflow-x-hidden w-full">
+      {/* suppressHydrationWarning: CSS vars from DB can differ between SSR and client, that's expected */}
+      <style suppressHydrationWarning dangerouslySetInnerHTML={{ __html: `:root{${globalCss}}` }} />
+      <script suppressHydrationWarning dangerouslySetInnerHTML={{ __html: `(function(){try{var p=new URLSearchParams(window.location.search);var keys=['utm_source','utm_medium','utm_campaign','utm_content','utm_term','src','sck'];var found=false;keys.forEach(function(k){if(p.get(k)){localStorage.setItem('_utm_'+k,p.get(k));found=true;}});if(found)localStorage.setItem('_utm_ts',Date.now().toString());var fbclid=p.get('fbclid');if(fbclid)localStorage.setItem('_fbc','fb.1.'+Date.now()+'.'+fbclid);var fbp=p.get('fbp');if(fbp)localStorage.setItem('_fbp',fbp);var px=p.get('px');if(px)localStorage.setItem('_pxsrc',px);var vsid=p.get('sid');if(vsid){localStorage.setItem('_sid',vsid);}else if(!localStorage.getItem('_sid')){localStorage.setItem('_sid',Math.random().toString(36).slice(2)+Date.now().toString(36));}}catch(e){}})();` }} />
+      <MetaPageView />
+      <PresenceTracker />
+      <SessionRecorder />
+      <MirrorReceiver />
+<Header
+        menuItems={headerMenu?.items || []}
+        storeName={sm.storeName as string}
+        logoImage={(vh.logoImage as string) || undefined}
+        logoDesktopHeight={Number(vh.logoDesktopHeight) || 40}
+        logoMobileHeight={Number(vh.logoMobileHeight) || 32}
+        headerBgColor={(vh.bgColor as string) || undefined}
+        headerLinkColor={(vh.linkColor as string) || undefined}
+        announcementTexts={(() => {
+          const raw = va.texts;
+          const arr = Array.isArray(raw)
+            ? raw.filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+            : [];
+          if (arr.length > 0) return arr;
+          const legacy = (va.text as string) || (sm.announcementText as string) || undefined;
+          return legacy ? [legacy] : undefined;
+        })()}
+        announcementIntervalSeconds={Number(va.intervalSeconds) || undefined}
+        announcementBgColor={(va.bgColor as string) || undefined}
+        announcementTextColor={(va.textColor as string) || undefined}
+      />
+      <main className="flex-1">{children}</main>
+      <NewsletterBanner />
+      <Footer
+        menuItems={footerMenu?.items || []}
+        storeName={sm.storeName as string}
+        bgColor={(vf.bgColor as string) || undefined}
+        textColor={(vf.textColor as string) || undefined}
+        headingColor={(vf.headingColor as string) || undefined}
+        logoImage={(vf.logoImage as string) || undefined}
+        description={(vf.description as string) || undefined}
+        showDescription={bool(vf.showDescription)}
+        instagram={(vf.instagram as string) || undefined}
+        facebook={(vf.facebook as string) || undefined}
+        showSocial={bool(vf.showSocial)}
+        phone={(vf.phone as string) || (sm.phone as string) || undefined}
+        email={(vf.email as string) || (sm.email as string) || undefined}
+        address={(vf.address as string) || (sm.address as string) || undefined}
+        showContact={bool(vf.showContact)}
+        menuTitle={(vf.menuTitle as string) || "Informações"}
+        showMenu={bool(vf.showMenu)}
+        legalText={(vf.legalText as string) || undefined}
+        showLegalText={bool(vf.showLegalText, false)}
+        sealAbove={(vf.sealAbove as string) || undefined}
+        showCopyright={bool(vf.showCopyright)}
+        copyrightText={(vf.copyrightText as string) || undefined}
+        sealBottomLeft={(vf.sealBottomLeft as string) || undefined}
+        sealBottomRight={(vf.sealBottomRight as string) || undefined}
+      />
+    </div>
+  );
+}

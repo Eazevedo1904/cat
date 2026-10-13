@@ -1,0 +1,21 @@
+{
+  "regions": ["gru1"],
+  "redirects": [
+    {
+      "source": "/:path*",
+      "has": [{ "type": "host", "value": "www.loja-caterpillar.com" }],
+      "destination": "https://loja-caterpillar.com/:path*",
+      "permanent": true
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/check-payments",
+      "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/cron/auto-status",
+      "schedule": "0 7 * * *"
+    }
+  ]
+}
